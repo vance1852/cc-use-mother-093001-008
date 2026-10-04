@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -76,19 +77,25 @@ class Database:
         self.connection.execute("PRAGMA foreign_keys = ON")
         self.connection.execute("PRAGMA busy_timeout = 5000")
         self.connection.executescript(SCHEMA)
+        self._tx_lock = threading.RLock()
 
     @contextmanager
-    def transaction(self, immediate: bool = False) -> Iterator[sqlite3.Connection]:
-        """在异常时回滚，在成功时提交。"""
+    def transaction(self, immediate: bool = True) -> Iterator[sqlite3.Connection]:
+        """在异常时回滚，在成功时提交。
 
-        self.connection.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
-        try:
-            yield self.connection
-        except Exception:
-            self.connection.rollback()
-            raise
-        else:
-            self.connection.commit()
+        进程内用可重入锁串行化写事务，配合 BEGIN IMMEDIATE，
+        保证并发领料等场景按提交顺序逐一判定库存，不会出现负库存。
+        """
+
+        with self._tx_lock:
+            self.connection.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+            try:
+                yield self.connection
+            except Exception:
+                self.connection.rollback()
+                raise
+            else:
+                self.connection.commit()
 
     def close(self) -> None:
         """关闭底层连接。"""
